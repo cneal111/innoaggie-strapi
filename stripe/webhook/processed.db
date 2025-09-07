@@ -1,0 +1,6 @@
+STRIPE_WEBHOOK_SECRET=whsec_************************
+STRIPE_API_KEY=sk_live_or_test_************************
+PORT=3000
+# Strapi (if calling via REST)
+STRAPI_API_URL=https://your-strapi-domain.com
+STRAPI_TOKEN=************************

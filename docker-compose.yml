@@ -1,0 +1,50 @@
+version: "3.9"
+services:
+  strapi:
+    build:
+      context: ./innoaggie-admin
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    restart: unless-stopped
+    env_file: ./innoaggie-admin/.env
+    ports:
+      - "127.0.0.1:1337:1337"
+    volumes:
+      - strapi-uploads:/opt/app/public/uploads
+      - strapi-sqlite:/opt/app/.tmp
+    environment:
+      NODE_ENV: production
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:1337/_health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  stripe-webhook:
+    build:
+      context: ./stripe
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    restart: unless-stopped
+    env_file: ./stripe/webhook/.env
+    ports:
+      - "127.0.0.1:8084:8084"
+    environment:
+      NODE_ENV: production
+      STRIPE_API_KEY: ${STRIPE_API_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_WEBHOOK_PORT: ${STRIPE_WEBHOOK_PORT:-8084}
+      STRAPI_API_URL: http://strapi:1337
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8084/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  strapi-uploads:
+  strapi-sqlite:
+
+networks:
+  default:
+    driver: bridge
