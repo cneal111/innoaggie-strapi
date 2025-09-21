@@ -8,7 +8,7 @@ services:
     restart: unless-stopped
     env_file: ./innoaggie-admin/.env
     ports:
-      - "127.0.0.1:1337:1337"
+      - "1337:1337"
     volumes:
       - strapi-uploads:/opt/app/public/uploads
       - strapi-sqlite:/opt/app/.tmp
@@ -28,7 +28,7 @@ services:
     restart: unless-stopped
     env_file: ./stripe/webhook/.env
     ports:
-      - "127.0.0.1:8084:8084"
+      - "8084:8084"
     environment:
       NODE_ENV: production
       STRIPE_API_KEY: ${STRIPE_API_KEY:-}
