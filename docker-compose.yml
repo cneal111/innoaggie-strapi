@@ -4,6 +4,7 @@ services:
     build:
       context: ./innoaggie-admin
       dockerfile: Dockerfile
+    container_name: strapi
     platform: linux/amd64
     restart: unless-stopped
     env_file: ./innoaggie-admin/.env
@@ -24,6 +25,7 @@ services:
     build:
       context: ./stripe
       dockerfile: Dockerfile
+    container_name: stripe-webhook
     platform: linux/amd64
     restart: unless-stopped
     env_file: ./stripe/webhook/.env
