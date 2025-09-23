@@ -49,4 +49,5 @@ volumes:
 
 networks:
   default:
-    driver: bridge
+    external:
+      name: innoaggie-net
