@@ -1,44 +1,40 @@
-# --- Build stage (Debian, not Alpine) ---
-FROM node:20-bookworm-slim AS build
-ENV NODE_ENV=production
-# build tools + libvips for sharp; python3 for native builds
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential python3 git libvips \
- && rm -rf /var/lib/apt/lists/*
+# Creating multi-stage build for production
+FROM node:22-alpine AS build
+RUN apk update && apk add --no-cache build-base gcc autoconf automake zlib-dev libpng-dev vips-dev git > /dev/null 2>&1
+ARG NODE_ENV=production
+ENV NODE_ENV=${NODE_ENV}
 
-WORKDIR /opt/app
-
-# lockfile-first install INSIDE the image (no host node_modules)
+WORKDIR /opt/
 COPY package.json package-lock.json ./
-RUN rm -rf node_modules && npm ci --include=dev --prefer-offline
-
-# App source
+RUN npm install -g node-gyp
+RUN npm config set fetch-retry-maxtimeout 600000 -g && npm install --only=production
+ENV PATH=/opt/node_modules/.bin:$PATH
+WORKDIR /opt/app
 COPY . .
-
-# Force better-sqlite3 to be compiled for THIS image/arch
-# (NPM v9 supports --build-from-source; also set env for safety)
-ENV npm_config_build_from_source=true
-RUN npm rebuild better-sqlite3 --build-from-source || true
-
-# Build admin
 RUN npm run build
 
-# Trim dev deps for runtime
-RUN npm prune --omit=dev
-
-# --- Runtime stage ---
-FROM node:20-bookworm-slim
-ENV NODE_ENV=production
-RUN apt-get update && apt-get install -y --no-install-recommends libvips \
- && rm -rf /var/lib/apt/lists/*
-
+# Creating final production image
+FROM node:22-alpine
+RUN apk add --no-cache vips-dev
+ARG NODE_ENV=production
+ENV NODE_ENV=${NODE_ENV}
+WORKDIR /opt/
+COPY --from=build /opt/node_modules ./node_modules
 WORKDIR /opt/app
 COPY --from=build /opt/app ./
+ENV PATH=/opt/node_modules/.bin:$PATH
 
-# Ensure persistent dirs exist & perms are sane
-RUN mkdir -p ./public/uploads ./.tmp && \
-    useradd -m -u 10001 strapi && chown -R strapi:strapi /opt/app
-USER strapi
+# (unchanged) create dirs and chown inside image
+RUN mkdir -p /opt/app/.tmp /opt/app/public/uploads && chown -R node:node /opt/app
+
+# --- minimal addition: tiny entrypoint to fix perms on mounted volumes ---
+USER root
+# write a 5-line script that runs at container start (after volumes are mounted)
+RUN printf '#!/bin/sh\nset -e\nmkdir -p /opt/app/.tmp /opt/app/public/uploads\nchown -R node:node /opt/app/.tmp /opt/app/public/uploads || true\nexec "$@"\n' > /entrypoint.sh \
+ && chmod +x /entrypoint.sh
+USER node
+ENTRYPOINT ["/entrypoint.sh"]
+# --- end minimal addition ---
 
 EXPOSE 1337
 CMD ["npm", "run", "start"]
