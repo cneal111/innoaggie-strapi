@@ -31,12 +31,6 @@ services:
     env_file: ./stripe/webhook/.env
     ports:
       - "8084:8084"
-    environment:
-      NODE_ENV: production
-      STRIPE_API_KEY: ${STRIPE_API_KEY:-}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
-      STRIPE_WEBHOOK_PORT: ${STRIPE_WEBHOOK_PORT:-8084}
-      STRAPI_API_URL: http://strapi:1337
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8084/health"]
       interval: 10s
