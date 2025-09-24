@@ -39,10 +39,17 @@ RUN mkdir -p /opt/app/.tmp /opt/app/public/uploads && chown -R node:node /opt/ap
 
 # minimal runtime fix so mounted volumes are writable
 USER root
-RUN printf '#!/bin/sh\nset -e\nmkdir -p /opt/app/.tmp /opt/app/public/uploads\nchown -R node:node /opt/app/.tmp /opt/app/public/uploads || true\nexec \"$@\"\n' > /entrypoint.sh \
- && chmod +x /entrypoint.sh
+
+# write entrypoint safely (no escaping issues)
+RUN cat > /entrypoint.sh <<'SH'
+#!/bin/sh
+set -e
+mkdir -p /opt/app/.tmp /opt/app/public/uploads
+chown -R node:node /opt/app/.tmp /opt/app/public/uploads || true
+exec "$@"
+SH
+RUN chmod +x /entrypoint.sh
+
 USER node
 ENTRYPOINT ["/entrypoint.sh"]
-
-EXPOSE 1337
-CMD ["npm", "run", "start"]
+CMD ["npm","run","start"]
