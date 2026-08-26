@@ -1,6 +1,7 @@
 const express = require("express");
 const Stripe = require("stripe");
 const nodemailer = require("nodemailer");
+const path = require("path");
 require("dotenv").config();
 
 const app = express();
@@ -259,6 +260,9 @@ async function sendPurchaseEmail(session, lineItems) {
         <html>
         <body style="font-family:Arial,sans-serif;line-height:1.6;color:#333;">
           <div style="max-width:600px;margin:0 auto;padding:20px;">
+            <div style="text-align:center;margin-bottom:24px;">
+              <img src="cid:logo" alt="Inno Aggie" style="width:140px;height:auto;" />
+            </div>
             <h1 style="color:#2E7D32;font-size:24px;">New Order</h1>
 
             <p><strong>Type:</strong> ${escapeHtml(kind)}</p>
@@ -290,6 +294,15 @@ async function sendPurchaseEmail(session, lineItems) {
         </body>
         </html>
       `,
+      attachments: [
+        {
+          filename: "inno_logo.png",
+          // Resolved from this file, not the cwd: the container starts with
+          // `node webhook/server.js` from /app, so a relative path would break.
+          path: path.join(__dirname, "assets", "inno_logo_email.png"),
+          cid: "logo",
+        },
+      ],
     });
 
     console.log(`Purchase notification sent for session ${session.id}`);

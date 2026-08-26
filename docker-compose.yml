@@ -32,7 +32,7 @@ services:
     ports:
       - "8084:8084"
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8084/health"]
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8084/healthz"]
       interval: 10s
       timeout: 5s
       retries: 10
