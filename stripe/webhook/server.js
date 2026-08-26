@@ -1,5 +1,6 @@
 const express = require("express");
 const Stripe = require("stripe");
+const nodemailer = require("nodemailer");
 require("dotenv").config();
 
 const app = express();
@@ -55,14 +56,34 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
           priceId: li.price?.id,
         })));
 
-        for (const item of lineItems.data) {
-          const productName = item?.description?.trim();
-          const qty = Number(item?.quantity ?? 1);
-          if (!productName || qty <= 0) {
-            console.warn("Skipping item: missing name or non-positive qty", { productName, qty });
-            continue;
+        // Notify first. A completed sale is worth knowing about whether or not
+        // the inventory sync below succeeds, so nothing is allowed to run
+        // between the payment check and the mail send.
+        await sendPurchaseEmail(session, lineItems.data);
+
+        // Inventory sync is best-effort and must never fail the handler. A 500
+        // here makes Stripe redeliver the event, which would re-send the email
+        // above and can decrement a second time, since the idempotency guards
+        // are in-memory and lost on restart. decrementInventoryByName throws
+        // when a Stripe product name has no exact match in Strapi, which is the
+        // likely failure whenever a new SKU is added on one side only.
+        try {
+          for (const item of lineItems.data) {
+            const productName = item?.description?.trim();
+            const qty = Number(item?.quantity ?? 1);
+            if (!productName || qty <= 0) {
+              console.warn("Skipping item: missing name or non-positive qty", { productName, qty });
+              continue;
+            }
+            await decrementInventoryByName(productName, qty); // uses documentId under the hood
           }
-          await decrementInventoryByName(productName, qty); // uses documentId under the hood
+        } catch (inventoryErr) {
+          console.error(
+            `INVENTORY SYNC FAILED for session ${session.id}. The order email was ` +
+              `sent, but stock was not decremented — correct it manually in Strapi. ` +
+              `Cause:`,
+            inventoryErr
+          );
         }
 
         markProcessedSession(session.id);
@@ -165,4 +186,116 @@ async function decrementInventoryByName(productName, qty = 1) {
 
 async function safeText(resp) {
   try { return await resp.text(); } catch { return "<no body>"; }
+}
+/* ---------------------------
+   Purchase notification email
+---------------------------- */
+
+const mailTransporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : 587,
+  secure: process.env.SMTP_SECURE === "true",
+  auth: process.env.SMTP_USER
+    ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    : undefined,
+});
+
+/** Stripe amounts are in the currency's minor unit. */
+function formatMoney(amount, currency) {
+  if (typeof amount !== "number") return "\u2014";
+  return (amount / 100).toLocaleString("en-US", {
+    style: "currency",
+    currency: (currency || "usd").toUpperCase(),
+  });
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/**
+ * Notifies the business that a checkout completed. Stripe sends the customer
+ * their own receipt, so this is internal only. Subscription renewals are not
+ * covered here - they arrive as invoice.paid and are managed in Stripe.
+ *
+ * Everything here comes off the session and the line items already fetched for
+ * the inventory update - no extra Stripe calls, and no reliance on
+ * session.metadata, which is empty for Payment Link checkouts unless set per
+ * link.
+ */
+async function sendPurchaseEmail(session, lineItems) {
+  if (!process.env.MAIL_FROM || !process.env.MAIL_TO) {
+    console.warn("MAIL_FROM/MAIL_TO not set; skipping purchase notification.");
+    return;
+  }
+
+  try {
+    const customer = session.customer_details || {};
+    const rows = (lineItems || [])
+      .map(
+        (li) =>
+          `<tr>
+             <td style="padding:8px;border-bottom:1px solid #eee;">${escapeHtml(li.description)}</td>
+             <td style="padding:8px;border-bottom:1px solid #eee;text-align:center;">${escapeHtml(li.quantity)}</td>
+             <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${formatMoney(li.amount_total, li.currency || session.currency)}</td>
+           </tr>`
+      )
+      .join("");
+
+    const total = formatMoney(session.amount_total, session.currency);
+    const kind = session.mode === "subscription" ? "Subscription started" : "One-time purchase";
+
+    await mailTransporter.sendMail({
+      from: process.env.MAIL_FROM,
+      to: process.env.MAIL_TO,
+      replyTo: customer.email || undefined,
+      subject: `New order - ${total}`,
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <body style="font-family:Arial,sans-serif;line-height:1.6;color:#333;">
+          <div style="max-width:600px;margin:0 auto;padding:20px;">
+            <h1 style="color:#2E7D32;font-size:24px;">New Order</h1>
+
+            <p><strong>Type:</strong> ${escapeHtml(kind)}</p>
+            <p><strong>Customer:</strong> ${escapeHtml(customer.name || "\u2014")}</p>
+            <p><strong>Email:</strong> ${escapeHtml(customer.email || "\u2014")}</p>
+            <p><strong>Phone:</strong> ${escapeHtml(customer.phone || "\u2014")}</p>
+
+            <table style="width:100%;border-collapse:collapse;margin-top:20px;">
+              <thead>
+                <tr>
+                  <th style="padding:8px;text-align:left;border-bottom:2px solid #333;">Item</th>
+                  <th style="padding:8px;text-align:center;border-bottom:2px solid #333;">Qty</th>
+                  <th style="padding:8px;text-align:right;border-bottom:2px solid #333;">Amount</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+              <tfoot>
+                <tr>
+                  <td colspan="2" style="padding:8px;text-align:right;font-weight:bold;">Total</td>
+                  <td style="padding:8px;text-align:right;font-weight:bold;">${total}</td>
+                </tr>
+              </tfoot>
+            </table>
+
+            <p style="margin-top:30px;padding-top:20px;border-top:1px solid #ddd;color:#666;font-size:12px;">
+              Stripe session ${escapeHtml(session.id)}. The customer receipt is sent by Stripe.
+            </p>
+          </div>
+        </body>
+        </html>
+      `,
+    });
+
+    console.log(`Purchase notification sent for session ${session.id}`);
+  } catch (err) {
+    // Swallowed on purpose: a mail outage must not 500 the handler and trigger
+    // a Stripe redelivery of an event that was otherwise handled fine.
+    console.error("Failed to send purchase notification email:", err);
+  }
 }
