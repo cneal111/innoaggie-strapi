@@ -201,6 +201,99 @@ const mailTransporter = nodemailer.createTransport({
     : undefined,
 });
 
+const DELIVERY_TZ = "America/Chicago";
+
+/**
+ * The delivery window the customer chose on the site. It travels as the payment
+ * link's client_reference_id (see lib/delivery.ts in the site repo), which is
+ * how a payment is matched to a window without anything being stored before
+ * checkout completes.
+ *
+ * Format: 2026-09-12_0900-1000
+ */
+function parseDeliverySlot(reference) {
+  if (typeof reference !== "string") return null;
+  const m = reference.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})-(\d{2})(\d{2})$/);
+  if (!m) return null;
+  const [, y, mo, d, sh, sm, eh, em] = m.map(Number);
+
+  // The reference arrives on a URL the customer can edit, so digit-count alone
+  // is not enough: reject impossible dates and times rather than letting them
+  // reach the notification and the calendar invite.
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  if (sh > 23 || eh > 23 || sm > 59 || em > 59) return null;
+  if (eh * 60 + em <= sh * 60 + sm) return null;
+
+  const monthNames = ["January","February","March","April","May","June","July",
+                      "August","September","October","November","December"];
+  const start = zonedToUtc(y, mo, d, sh, sm);
+  const end = zonedToUtc(y, mo, d, eh, em);
+  // Feb 30 passes the range checks but rolls over into March; confirm the
+  // instant still lands on the date that was asked for.
+  const check = new Intl.DateTimeFormat("en-CA", {
+    timeZone: DELIVERY_TZ, year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(start);
+  if (check !== `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`) return null;
+
+  const h12 = (h) => `${h % 12 === 0 ? 12 : h % 12}:00 ${h >= 12 ? "PM" : "AM"}`;
+  return {
+    start,
+    end,
+    text: `${monthNames[mo - 1]} ${d}, ${y} · ${h12(sh)} – ${h12(eh)} (Central)`,
+  };
+}
+
+/** Local wall-clock time in the delivery zone -> the corresponding UTC instant. */
+function zonedToUtc(y, mo, d, h, min) {
+  const guess = Date.UTC(y, mo - 1, d, h, min);
+  const asUtc = new Date(new Date(guess).toLocaleString("en-US", { timeZone: "UTC" }));
+  const asLocal = new Date(new Date(guess).toLocaleString("en-US", { timeZone: DELIVERY_TZ }));
+  return new Date(guess - (asLocal.getTime() - asUtc.getTime()));
+}
+
+/** Formats a Date as an iCalendar UTC timestamp. */
+function icsStamp(date) {
+  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+}
+
+function icsEscape(v) {
+  return String(v ?? "").replace(/([,;\\])/g, "\\$1").replace(/\n/g, "\\n");
+}
+
+/**
+ * A calendar invite for the drop-off. Sent as an attachment rather than pushed
+ * to a calendar API so this needs no extra credentials in the webhook
+ * container; opening it adds the delivery to whatever calendar you use.
+ */
+function buildDeliveryIcs(slot, session, itemSummary, address) {
+  const lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Innovative Agriculture//Deliveries//EN",
+    "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH",
+    "BEGIN:VEVENT",
+    `UID:${session.id}@innoaggie.com`,
+    `DTSTAMP:${icsStamp(new Date())}`,
+    `DTSTART:${icsStamp(slot.start)}`,
+    `DTEND:${icsStamp(slot.end)}`,
+    `SUMMARY:${icsEscape("Delivery — " + (session.customer_details?.name || "Customer"))}`,
+    `DESCRIPTION:${icsEscape(itemSummary + "\n" + (session.customer_details?.email || ""))}`,
+    address ? `LOCATION:${icsEscape(address)}` : null,
+    "END:VEVENT",
+    "END:VCALENDAR",
+  ].filter(Boolean);
+  return lines.join("\r\n");
+}
+
+/** Flattens a Stripe address object to a single line. */
+function formatAddress(addr) {
+  if (!addr) return null;
+  return [addr.line1, addr.line2, addr.city, addr.state, addr.postal_code, addr.country]
+    .filter(Boolean)
+    .join(", ");
+}
+
 /** Stripe amounts are in the currency's minor unit. */
 function formatMoney(amount, currency) {
   if (typeof amount !== "number") return "\u2014";
@@ -250,11 +343,23 @@ async function sendPurchaseEmail(session, lineItems) {
     const total = formatMoney(session.amount_total, session.currency);
     const kind = session.mode === "subscription" ? "Subscription started" : "One-time purchase";
 
+    // Delivery is in person. The window comes from the site; the address is
+    // whatever Stripe collected, which requires address collection to be
+    // switched on for the payment link.
+    const slot = parseDeliverySlot(session.client_reference_id);
+    const address =
+      formatAddress(session.shipping_details?.address) ||
+      formatAddress(session.collected_information?.shipping_details?.address) ||
+      formatAddress(session.customer_details?.address);
+    const itemSummary = (lineItems || [])
+      .map((li) => `${li.quantity} x ${li.description}`)
+      .join(", ");
+
     await mailTransporter.sendMail({
       from: process.env.MAIL_FROM,
       to: process.env.MAIL_TO,
       replyTo: customer.email || undefined,
-      subject: `New order - ${total}`,
+      subject: slot ? `New order - ${total} - ${slot.text}` : `New order - ${total}`,
       html: `
         <!DOCTYPE html>
         <html>
@@ -269,6 +374,13 @@ async function sendPurchaseEmail(session, lineItems) {
             <p><strong>Customer:</strong> ${escapeHtml(customer.name || "\u2014")}</p>
             <p><strong>Email:</strong> ${escapeHtml(customer.email || "\u2014")}</p>
             <p><strong>Phone:</strong> ${escapeHtml(customer.phone || "\u2014")}</p>
+
+            <div style="margin:20px 0;padding:14px 16px;background:#f1f8f2;border-left:4px solid #2E7D32;">
+              <p style="margin:0 0 6px;"><strong>Delivery window:</strong>
+                ${slot ? escapeHtml(slot.text) : "<em>not selected \u2014 contact the customer</em>"}</p>
+              <p style="margin:0;"><strong>Address:</strong>
+                ${address ? escapeHtml(address) : "<em>not collected \u2014 enable address collection on the payment link</em>"}</p>
+            </div>
 
             <table style="width:100%;border-collapse:collapse;margin-top:20px;">
               <thead>
@@ -295,6 +407,15 @@ async function sendPurchaseEmail(session, lineItems) {
         </html>
       `,
       attachments: [
+        ...(slot
+          ? [
+              {
+                filename: "delivery.ics",
+                content: buildDeliveryIcs(slot, session, itemSummary, address),
+                contentType: "text/calendar; method=PUBLISH; charset=UTF-8",
+              },
+            ]
+          : []),
         {
           filename: "inno_logo.png",
           // Resolved from this file, not the cwd: the container starts with
