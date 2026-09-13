@@ -27,6 +27,9 @@
     "stripe": "^18.5.0",
     "styled-components": "^6.0.0"
   },
+  "overrides": {
+    "sharp": "^0.35.4"
+  },
   "devDependencies": {
     "@types/node": "^20",
     "@types/react": "^18",
@@ -34,7 +37,7 @@
     "typescript": "^5"
   },
   "engines": {
-    "node": ">=18.0.0 <=22.x.x",
+    "node": ">=22.0.0 <=24.x.x",
     "npm": ">=6.0.0"
   },
   "strapi": {
